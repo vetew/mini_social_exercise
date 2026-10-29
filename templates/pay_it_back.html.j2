@@ -1,0 +1,69 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+
+{# Chapter 3, Design Claim 31: highlight opportunities to return favors #}
+<div class="container mt-4 col-md-8 mx-auto">
+  <h2 class="border-bottom pb-2 mb-2">Pay it back</h2>
+  <p class="text-muted mb-4">
+    {{ helper_count }} {{ 'person has' if helper_count == 1 else 'people have' }}
+    reacted to or commented on your posts. Return the favor by engaging with their posts!
+  </p>
+
+  {% if favors %}
+    {% for f in favors %}
+      <div class="card shadow-sm mb-4">
+        <div class="card-header">
+          <!-- Who helped me and how -->
+          <strong>{{ user_display(f.username) }}</strong>
+          <span class="text-muted">
+            has given you
+            {% if f.reaction_count %}{{ f.reaction_count }} reaction{{ 's' if f.reaction_count > 1 }}{% endif %}
+            {% if f.reaction_count and f.comment_count %} and {% endif %}
+            {% if f.comment_count %}{{ f.comment_count }} comment{{ 's' if f.comment_count > 1 }}{% endif %}
+          </span>
+        </div>
+
+        <div class="card-body">
+          {% for post in f.posts %}
+            <div class="border rounded p-3 mb-3 bg-light">
+              <small class="text-muted">{{ post.created_at | datetimeformat }}</small>
+              <p class="mb-2">{{ post.content }}</p>
+
+              <!-- Quick reaction buttons: reuse the existing /react route.
+                   After reacting, the page reloads and this post disappears,
+                   because the favor has been returned. -->
+              <div class="d-flex flex-wrap gap-1 mb-2">
+                {% for reaction_type in reaction_types %}
+                  <form action="{{ url_for('add_reaction') }}" method="POST">
+                    <input type="hidden" name="post_id" value="{{ post.id }}">
+                    <input type="hidden" name="reaction" value="{{ reaction_type }}">
+                    <button type="submit" class="btn btn-light text-dark btn-sm" title="{{ reaction_type|capitalize }}">
+                      {{ reaction_emojis[reaction_type] }}
+                    </button>
+                  </form>
+                {% endfor %}
+              </div>
+
+              <!-- Quick comment: reuses the existing comment route -->
+              <form action="{{ url_for('add_comment', post_id=post.id) }}" method="POST" class="d-flex gap-2">
+                <input type="text" name="content" class="form-control form-control-sm"
+                       placeholder="Write a comment to {{ f.username }}..." required>
+                <button type="submit" class="btn btn-primary btn-sm">Comment</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endfor %}
+  {% elif helper_count == 0 %}
+    <div class="card shadow-sm"><div class="card-body text-center text-muted">
+      Nobody has reacted to or commented on your posts yet. Try <a href="/">posting something</a>!
+    </div></div>
+  {% else %}
+    <div class="card shadow-sm"><div class="card-body text-center text-muted">
+      You're all caught up! You have returned the favor to everyone who engaged with you.
+    </div></div>
+  {% endif %}
+</div>
+{% endblock %}

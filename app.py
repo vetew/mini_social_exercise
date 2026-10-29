@@ -1,7 +1,8 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
+import math
 import json
 import sqlite3
 import hashlib
@@ -214,15 +215,28 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
-
     # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
+    if content and content.strip():
+        # Coding Assignment 3, Design Claim 25: progressive access for newcomers
+        access_problem = check_newcomer_access('post')
+        if access_problem:
+            flash(access_problem, 'warning')
+            return redirect(url_for('newcomer_path'))
+
+        # Coding Assignment 2, Design Claim 20: if the post breaks a rule, show the
+        # reminder page first instead of publishing it.
+        reminder_page = check_before_publishing('post', content)
+        if reminder_page:
+            return reminder_page
+
+        # The original text is stored; moderate_content() is applied every time the
+        # post is displayed. This keeps the admin risk scores correct (they are
+        # calculated from the original text) and lets rule changes apply to old posts.
         db = get_db()
         db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+                   (user_id, content))
         db.commit()
+        resolve_reminder(content)  # log the outcome if the user came via the reminder
         flash('Your post was successfully created!', 'success')
     else:
         # This will catch empty posts or posts that were fully censored
@@ -436,9 +450,10 @@ def signup():
             session['user_id'] = new_user_id
             session['username'] = username
 
-            # 3. Flash a welcome message and redirect to the feed.
+            # 3. Flash a welcome message and send the newcomer to the Newcomer Path
+            #    (Coding Assignment 3, Design Claim 22: formal onboarding from the start)
             flash(f'Welcome, {username}! Your account has been created.', 'success')
-            return redirect(url_for('feed')) # Redirect to the main feed/dashboard
+            return redirect(url_for('newcomer_path'))
 
         except sqlite3.IntegrityError:
             flash('Username already taken. Please choose another one.', 'danger')
@@ -494,11 +509,21 @@ def add_comment(post_id):
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():
+        # Coding Assignment 2, Design Claim 20: reminder before a rule-breaking comment
+        reminder_page = check_before_publishing('comment', content, post_id=post_id)
+        if reminder_page:
+            return reminder_page
+
         db = get_db()
         db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
                    (post_id, user_id, content))
         db.commit()
+        came_from_reminder = request.form.get('prompt_id') is not None
+        resolve_reminder(content)
         flash('Your comment was added.', 'success')
+        # After the reminder page the referrer is the reminder itself, so go to the post
+        if came_from_reminder:
+            return redirect(url_for('post_detail', post_id=post_id))
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -804,7 +829,11 @@ def admin_dashboard():
                            comments_has_prev=(comments_page > 1),
 
                            current_tab=current_tab,
-                           PAGE_SIZE=PAGE_SIZE)
+                           PAGE_SIZE=PAGE_SIZE,
+
+                           # Coding Assignment 2, Design Claim 20: reminder statistics
+                           reminder_stats=get_reminder_stats(),
+                           recent_reminders=get_recent_reminders())
 
 
 
@@ -867,7 +896,480 @@ def loop_color(user_id):
 
 
 # ----- Functions to be implemented are below
+
+# Coding Assignment #1
+# Chapter 3 Design Claim 14: friends of friends
+
+
+@app.route('/people-you-may-know')
+def people_you_may_know():
+    """Shows 'friends of friends' suggestions for the logged-in user."""
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to see suggestions.', 'danger')
+        return redirect(url_for('login'))
+
+    # Find users who are followed by the people I follow (friends of friends).
+    # - f1: the people I follow
+    # - f2: the people THEY follow (= candidates)
+    # We leave out myself and users I already follow, and count how many
+    # of my followed users follow each candidate (= mutual connections).
+    candidates = query_db('''
+        SELECT u.id, u.username, u.profile,
+               COUNT(DISTINCT f1.followed_id) AS mutual_count
+        FROM follows f1
+        JOIN follows f2 ON f2.follower_id = f1.followed_id
+        JOIN users u ON u.id = f2.followed_id
+        WHERE f1.follower_id = ?
+          AND f2.followed_id != ?
+          AND f2.followed_id NOT IN (
+              SELECT followed_id FROM follows WHERE follower_id = ?
+          )
+        GROUP BY u.id
+        ORDER BY mutual_count DESC, u.username ASC
+        LIMIT 10
+    ''', (user_id, user_id, user_id))
+
+    suggestions = []
+    for candidate in candidates:
+        suggestion = dict(candidate)
+
+        # Names of (up to 3) people I follow who also follow this candidate.
+        # Showing familiar names explains WHY the person is suggested.
+        mutuals = query_db('''
+            SELECT u.username
+            FROM follows f1
+            JOIN follows f2 ON f2.follower_id = f1.followed_id
+            JOIN users u ON u.id = f1.followed_id
+            WHERE f1.follower_id = ? AND f2.followed_id = ?
+            LIMIT 3
+        ''', (user_id, suggestion['id']))
+        suggestion['mutual_names'] = [m['username'] for m in mutuals]
+
+        # The candidate's latest post gives a conversation starter,
+        # so the user can interact with them right away.
+        latest_post = query_db('''
+            SELECT id, content, created_at FROM posts
+            WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
+        ''', (suggestion['id'],), one=True)
+        if latest_post:
+            post = dict(latest_post)
+            post['content'], _ = moderate_content(post['content'])
+            suggestion['latest_post'] = post
+        else:
+            suggestion['latest_post'] = None
+
+        # Moderate the profile text the same way the profile page does
+        suggestion['profile'], _ = moderate_content(suggestion.get('profile') or '')
+        suggestions.append(suggestion)
+
+    # How many users I follow, to show a helpful message if it is zero
+    following_count = query_db('SELECT COUNT(*) AS cnt FROM follows WHERE follower_id = ?',
+                               (user_id,), one=True)['cnt']
+
+    return render_template('people_you_may_know.html.j2',
+                           suggestions=suggestions,
+                           following_count=following_count)
+
+
+
+# Chapter 3, Design Claim 31: "Highlighting opportunities to return favors to
+# specific others increases normative commitment to the community."
+# This page lists the people who have reacted to or commented on YOUR posts,
+# and shows their posts that you have not yet engaged with, so you can
+# easily return the favor (react or comment) right on the page.
+
+@app.route('/pay-it-back')
+def pay_it_back():
+    """Shows posts from users who have engaged with the current user's posts."""
+    user_id = session.get('user_id')
+
+    if not user_id:
+        flash('You must be logged in to see this page.', 'danger')
+        return redirect(url_for('login'))
+
+    # Step 1: Find "helpers" = users who have reacted to or commented on
+    # my posts. We count reactions and comments separately so we can show
+    # exactly what each person has done for me.
+    helpers = query_db('''
+        SELECT u.id, u.username,
+               SUM(engagement.is_reaction) AS reaction_count,
+               SUM(1 - engagement.is_reaction) AS comment_count,
+               COUNT(*) AS total_count
+        FROM (
+            -- Reactions others have given to my posts
+            SELECT r.user_id, 1 AS is_reaction
+            FROM reactions r JOIN posts p ON r.post_id = p.id
+            WHERE p.user_id = ? AND r.user_id != ?
+            UNION ALL
+            -- Comments others have written on my posts
+            SELECT c.user_id, 0 AS is_reaction
+            FROM comments c JOIN posts p ON c.post_id = p.id
+            WHERE p.user_id = ? AND c.user_id != ?
+        ) AS engagement
+        JOIN users u ON u.id = engagement.user_id
+        GROUP BY u.id
+        ORDER BY total_count DESC, u.username ASC
+    ''', (user_id, user_id, user_id, user_id))
+
+    favors = []
+    for helper in helpers:
+        helper_dict = dict(helper)
+
+        # Step 2: For each helper, find their latest posts that I have NOT
+        # yet reacted to or commented on. These are the "favors to return".
+        posts_raw = query_db('''
+            SELECT p.id, p.content, p.created_at
+            FROM posts p
+            WHERE p.user_id = ?
+              AND p.id NOT IN (SELECT post_id FROM reactions WHERE user_id = ?)
+              AND p.id NOT IN (SELECT post_id FROM comments WHERE user_id = ?)
+            ORDER BY p.created_at DESC
+            LIMIT 3
+        ''', (helper_dict['id'], user_id, user_id))
+
+        # Skip helpers whose posts I have already engaged with (nothing to return)
+        if not posts_raw:
+            continue
+
+        posts = []
+        for post_raw in posts_raw:
+            post = dict(post_raw)
+            post['content'], _ = moderate_content(post['content'])
+            posts.append(post)
+        helper_dict['posts'] = posts
+        favors.append(helper_dict)
+
+        # Keep the page short: show the 10 most helpful people
+        if len(favors) >= 10:
+            break
+
+    return render_template('pay_it_back.html.j2',
+                           favors=favors,
+                           helper_count=len(helpers),
+                           reaction_emojis=REACTION_EMOJIS,
+                           reaction_types=REACTION_TYPES)
+
+
+# Chapter 2, Design Claim 13: "Providing members with specific and highly
+# challenging goals, whether self-set or system-suggested, increases contribution."
+# Supported by Chapter 2 Design Claims 14 (goals with deadlines) and
+# 15 (frequent feedback about performance towards the goal).
+
+# Users set a weekly goal for posts and comments. The system also suggests a
+# challenging goal. Progress is shown with progress bars on the goals page
+# and on the front page, together with the deadline (end of the week) and a
+# comparison to other active members.
+
+from datetime import timedelta
+
+# Minimum goals the system suggests, so that the suggestion is always a challenge
+MIN_SUGGESTED_POSTS = 3
+MIN_SUGGESTED_COMMENTS = 5
+
+
+def init_goals_table():
+    """Creates the 'goals' table if it does not exist yet."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS goals (
+            user_id      INTEGER PRIMARY KEY,
+            post_goal    INTEGER NOT NULL,
+            comment_goal INTEGER NOT NULL
+        )
+    ''')
+    db.commit()
+    db.close()
+
+
+# Create the table when the app starts
+init_goals_table()
+
+
+def get_week_start():
+    """Returns the start of the current week (Monday 00:00, UTC) and days left.
+    UTC is used because the database stores timestamps in UTC."""
+    now = datetime.utcnow()
+    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = week_start + timedelta(days=7)
+    days_left = (week_end - now).days + 1  # +1 so that Sunday shows "1 day left"
+    return week_start, days_left
+
+
+def count_this_week(table, user_id, week_start):
+    """Counts the user's posts or comments created since the start of the week."""
+    row = query_db(f'SELECT COUNT(*) AS cnt FROM {table} WHERE user_id = ? AND created_at >= ?',
+                   (user_id, week_start.strftime('%Y-%m-%d %H:%M:%S')), one=True)
+    return row['cnt']
+
+
+def suggest_goal(user_id):
+    """Suggests a challenging goal: 50 % more than the user's best week so far,
+    but never less than the minimum values."""
+    best_posts = query_db('''
+        SELECT MAX(cnt) AS best FROM (
+            SELECT COUNT(*) AS cnt FROM posts WHERE user_id = ?
+            GROUP BY strftime('%Y-%W', created_at))
+    ''', (user_id,), one=True)['best'] or 0
+    best_comments = query_db('''
+        SELECT MAX(cnt) AS best FROM (
+            SELECT COUNT(*) AS cnt FROM comments WHERE user_id = ?
+            GROUP BY strftime('%Y-%W', created_at))
+    ''', (user_id,), one=True)['best'] or 0
+    return {
+        'posts': max(MIN_SUGGESTED_POSTS, round(best_posts * 1.5)),
+        'comments': max(MIN_SUGGESTED_COMMENTS, round(best_comments * 1.5)),
+    }
+
+
+@app.template_global()
+def get_goal_progress(user_id):
+    """Returns the user's goal and progress for this week, or None if the user
+    has not set a goal. Registered as a template global so the front page
+    can show the progress widget without changing the feed() route."""
+    if not user_id:
+        return None
+    goal = query_db('SELECT post_goal, comment_goal FROM goals WHERE user_id = ?', (user_id,), one=True)
+    if not goal:
+        return None
+
+    week_start, days_left = get_week_start()
+    posts_done = count_this_week('posts', user_id, week_start)
+    comments_done = count_this_week('comments', user_id, week_start)
+
+    def percent(done, target):
+        # Progress bar width, capped at 100 %
+        return min(100, round(done / target * 100)) if target else 100
+
+    return {
+        'post_goal': goal['post_goal'],
+        'comment_goal': goal['comment_goal'],
+        'posts_done': posts_done,
+        'comments_done': comments_done,
+        'posts_percent': percent(posts_done, goal['post_goal']),
+        'comments_percent': percent(comments_done, goal['comment_goal']),
+        'completed': posts_done >= goal['post_goal'] and comments_done >= goal['comment_goal'],
+        'days_left': days_left,
+    }
+
+
+@app.route('/goals', methods=['GET', 'POST'])
+def goals():
+    """Page where the user sets a weekly goal and sees their progress."""
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to set goals.', 'danger')
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        # Read and validate the goal values from the form
+        try:
+            post_goal = int(request.form.get('post_goal', 0))
+            comment_goal = int(request.form.get('comment_goal', 0))
+        except ValueError:
+            flash('Goals must be numbers.', 'warning')
+            return redirect(url_for('goals'))
+
+        if not (1 <= post_goal <= 50 and 1 <= comment_goal <= 100):
+            flash('Please choose goals between 1-50 posts and 1-100 comments.', 'warning')
+            return redirect(url_for('goals'))
+
+        # INSERT OR REPLACE: creates the goal, or updates it if it already exists
+        db = get_db()
+        db.execute('INSERT OR REPLACE INTO goals (user_id, post_goal, comment_goal) VALUES (?, ?, ?)',
+                   (user_id, post_goal, comment_goal))
+        db.commit()
+        flash('Your weekly goal has been saved. Good luck!', 'success')
+        return redirect(url_for('goals'))
+
+    # Comparison with other members: average posts/comments this week
+    # among users who have been active this week (excluding the current user)
+    week_start, _ = get_week_start()
+    week_start_str = week_start.strftime('%Y-%m-%d %H:%M:%S')
+    community = query_db('''
+        SELECT COUNT(DISTINCT user_id) AS active_users,
+               SUM(is_post) AS posts, SUM(1 - is_post) AS comments
+        FROM (
+            SELECT user_id, 1 AS is_post FROM posts WHERE created_at >= ? AND user_id != ?
+            UNION ALL
+            SELECT user_id, 0 AS is_post FROM comments WHERE created_at >= ? AND user_id != ?
+        )
+    ''', (week_start_str, user_id, week_start_str, user_id), one=True)
+
+    community_avg = None
+    if community['active_users']:
+        community_avg = {
+            'users': community['active_users'],
+            'posts': round(community['posts'] / community['active_users'], 1),
+            'comments': round(community['comments'] / community['active_users'], 1),
+        }
+
+    return render_template('goals.html.j2',
+                           progress=get_goal_progress(user_id),
+                           suggestion=suggest_goal(user_id),
+                           community_avg=community_avg)
+
+
+
+
+
+
 # Coding Assignment #2
+
+# Shared helpers for content moderation (Assignment 2.1) and risk analysis
+# (Assignment 2.2). The rules implemented here follow the specification on
+# the /rules page (templates/rules.html.j2).
+
+
+# Score constants from the rules page, kept in one place so they are easy to check.
+SEVERE_VIOLATION_SCORE = 5.0      # Rules 1.1.1 and 1.1.2
+TIER3_WORD_SCORE = 2.0            # Rule 1.2.1, per match
+EXTERNAL_LINK_SCORE = 2.0         # Rule 1.2.2, per match
+EXCESSIVE_CAPS_SCORE = 0.5        # Rule 1.2.3, fixed
+CAPS_MIN_LETTERS = 15             # Rule 1.2.3: "more than 15 alphabetic characters"
+CAPS_UPPERCASE_RATIO = 0.70       # Rule 1.2.3: "more than 70% uppercase"
+
+SEVERE_REMOVAL_TEXT = '[content removed due to severe violation]'
+SPAM_REMOVAL_TEXT = '[content removed due to spam/scam policy]'
+LINK_REPLACEMENT_TEXT = '[link removed]'
+
+
+def build_whole_word_pattern(terms):
+    """
+    Builds one compiled, case-insensitive regex that matches any of the given
+    words/phrases as a *whole* word or phrase.
+
+    - re.escape() makes sure special characters in the word list are treated literally.
+    - Longer terms are tried first, so a phrase wins over a shorter word inside it.
+    - (?<!\\w) and (?!\\w) are used instead of \\b, because \\b does not work when a
+      term starts or ends with a non-letter character (e.g. "$$$").
+    Compiling one pattern per tier once at start-up is much faster than looping over
+    every word for every post, which matters on the admin page that scores all content.
+    """
+    escaped = sorted((re.escape(t) for t in terms if t), key=len, reverse=True)
+    return re.compile(r'(?<!\w)(?:' + '|'.join(escaped) + r')(?!\w)', re.IGNORECASE)
+
+
+TIER1_PATTERN = build_whole_word_pattern(TIER1_WORDS)
+TIER2_PATTERN = build_whole_word_pattern(TIER2_PHRASES)
+TIER3_PATTERN = build_whole_word_pattern(TIER3_WORDS)
+
+# Rule 1.2.2: an external link is anything starting with http(s):// or www.
+# The match continues until the next whitespace character.
+URL_PATTERN = re.compile(r'(?:https?://|www\.)\S+', re.IGNORECASE)
+
+
+def analyze_content(content):
+    """
+    Runs all moderation rules on a piece of text and explains what was found.
+
+    This is the "engine" behind moderate_content(). It returns more information
+    than moderate_content() needs, because the Design Claim 20 feature (reminder
+    at the point of action) has to tell the user *which* rule their text breaks.
+
+    Returns a dict:
+        moderated: the filtered text (what other users would see)
+        score:     the Content Score (float)
+        removed:   True if the whole text would be removed (Stage 1.1)
+        violations: list of dicts {rule, title, detail, points} - one per rule broken
+    """
+    result = {'moderated': content or '', 'score': 0.0, 'removed': False, 'violations': []}
+    if not content:
+        return result
+
+    # --- Stage 1.1: severe violations. The first match ends the check. ---
+
+    # Rule 1.1.1: Tier 1 words -> whole content removed, fixed score 5.0
+    match = TIER1_PATTERN.search(content)
+    if match:
+        result.update(moderated=SEVERE_REMOVAL_TEXT, score=SEVERE_VIOLATION_SCORE, removed=True)
+        result['violations'].append({
+            'rule': '1.1.1', 'title': 'Severe language',
+            'detail': f'"{match.group(0)}" is not allowed on MiniSocial. The whole text would be removed.',
+            'points': SEVERE_VIOLATION_SCORE})
+        return result
+
+    # Rule 1.1.2: Tier 2 spam/scam phrases -> whole content removed, fixed score 5.0
+    match = TIER2_PATTERN.search(content)
+    if match:
+        result.update(moderated=SPAM_REMOVAL_TEXT, score=SEVERE_VIOLATION_SCORE, removed=True)
+        result['violations'].append({
+            'rule': '1.1.2', 'title': 'Spam or scam phrase',
+            'detail': f'"{match.group(0)}" looks like spam. The whole text would be removed.',
+            'points': SEVERE_VIOLATION_SCORE})
+        return result
+
+    # --- Stage 1.2: scored violations. Score starts at 0.0. ---
+    moderated = content
+    score = 0.0
+
+    # Rule 1.2.1: each Tier 3 word is replaced by asterisks of the same length, +2.0 each
+    found_words = TIER3_PATTERN.findall(moderated)
+    if found_words:
+        moderated = TIER3_PATTERN.sub(lambda m: '*' * len(m.group(0)), moderated)
+        points = TIER3_WORD_SCORE * len(found_words)
+        score += points
+        result['violations'].append({
+            'rule': '1.2.1', 'title': 'Mild profanity',
+            'detail': f'{len(found_words)} word(s) would be hidden with asterisks: '
+                      + ', '.join(f'"{w}"' for w in found_words),
+            'points': points})
+
+    # Rule 1.2.2: each URL is replaced with "[link removed]", +2.0 each
+    found_links = URL_PATTERN.findall(moderated)
+    if found_links:
+        moderated = URL_PATTERN.sub(LINK_REPLACEMENT_TEXT, moderated)
+        points = EXTERNAL_LINK_SCORE * len(found_links)
+        score += points
+        result['violations'].append({
+            'rule': '1.2.2', 'title': 'External link',
+            'detail': f'{len(found_links)} link(s) would be shown as {LINK_REPLACEMENT_TEXT}.',
+            'points': points})
+
+    # Rule 1.2.3: >15 letters and >70 % of them uppercase -> +0.5, text is NOT modified.
+    # Counted from the original content so that masking does not change the result.
+    letters = [ch for ch in content if ch.isalpha()]
+    if len(letters) > CAPS_MIN_LETTERS:
+        upper_ratio = sum(1 for ch in letters if ch.isupper()) / len(letters)
+        if upper_ratio > CAPS_UPPERCASE_RATIO:
+            score += EXCESSIVE_CAPS_SCORE
+            result['violations'].append({
+                'rule': '1.2.3', 'title': 'Excessive capitalization',
+                'detail': f'{round(upper_ratio * 100)} % of the letters are capitals. '
+                          'Writing in capitals reads as shouting.',
+                'points': EXCESSIVE_CAPS_SCORE})
+
+    result['moderated'] = moderated
+    result['score'] = score
+    return result
+
+
+def account_age_days(created_at):
+    """
+    Returns the account age in whole days. created_at can be a datetime (the
+    normal case, thanks to PARSE_DECLTYPES) or a string. Returns None if unknown.
+    UTC is used because SQLite's CURRENT_TIMESTAMP is in UTC.
+    """
+    if created_at is None:
+        return None
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.strptime(created_at[:19], '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return None
+    return (datetime.utcnow() - created_at).days
+
+
+def get_risk_label(score):
+    """Translates a risk score to a label using the thresholds on the rules page."""
+    if score >= 5.0:
+        return 'HIGH'
+    if score >= 3.0:
+        return 'MEDIUM'
+    if score >= 1.0:
+        return 'LOW'
+    return 'NONE'
+
 
 # Assignment 2.2
 def user_risk_analysis(user_id):
@@ -882,11 +1384,40 @@ def user_risk_analysis(user_id):
             username: admin
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
-    
-    score = 0
 
-    return score;
+    Implementation follows Rule 2.2 on the /rules page.
+    """
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
+
+    # Step 1: Content Score of the profile text
+    _, profile_score = moderate_content(user['profile'] or '')
+
+    # Step 2: average Content Score of all posts (0 if the user has no posts)
+    post_rows = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    post_scores = [moderate_content(row['content'])[1] for row in post_rows]
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0.0
+
+    # Step 3: average Content Score of all comments (0 if the user has no comments)
+    comment_rows = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    comment_scores = [moderate_content(row['content'])[1] for row in comment_rows]
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0.0
+
+    # Step 4: weighted combination - posts are the most visible content, so they weigh 3x
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # Step 5: account age multiplier - new accounts are treated as riskier
+    age = account_age_days(user['created_at'])
+    if age is not None and age < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif age is not None and age < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+
+    # Step 6: cap the final score at 5.0
+    return min(user_risk_score, 5.0)
 
     
 # Assignment 2.1
@@ -905,12 +1436,251 @@ def moderate_content(content):
             username: admin
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
 
-    moderated_content = content
-    score = 0
+    Implementation: all rules (Part 1 of the /rules page) are applied in
+    analyze_content() above; this function only returns the two values the rest
+    of the codebase expects.
+    """
+    analysis = analyze_content(content)
+    moderated_content = analysis['moderated']
+    score = analysis['score']
     
     return moderated_content, score
+
+
+# Coding Assignment #2
+#
+# Design Claim 20 ch. 4:
+#   "Offering people reminders at the point of an action that may violate norms
+#    reduces the number of offenses."
+#
+
+#   1. While the user types a post or comment, the browser asks /moderation/check
+#      whether the text breaks a rule and shows a small live hint under the text box
+#      (static/moderation_reminder.js).
+#   2. When the user submits text that breaks a rule, it is NOT published right away.
+#      Instead a reminder page explains which rule is broken (with a link to the rule),
+#      shows how others would see the text and what risk score it would get, and lets
+#      the user edit the text, cancel, or post anyway. Text that would be removed
+#      completely (Tier 1 / Tier 2) cannot be posted anyway.
+#   3. Every reminder and what the user did after it is stored in the
+#      moderation_prompts table, and the admin dashboard shows how often reminders
+#      led to an edited (or cancelled) post. This lets us check whether the
+#      reminders actually reduce offenses, which is what the design claim predicts.
+
+# Possible outcomes of a reminder
+REMINDER_PENDING = 'pending'            # reminder shown, user has not decided yet
+REMINDER_REVISED = 'revised'            # user edited the text and posted a less risky version
+REMINDER_POSTED_ANYWAY = 'posted_anyway'  # user posted without lowering the score
+REMINDER_CANCELLED = 'cancelled'        # user decided not to post at all
+
+
+def init_moderation_prompts_table():
+    """Creates the table that logs the Design Claim 20 reminders, if it does not exist."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS moderation_prompts (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            content_type  TEXT    NOT NULL,           -- 'post' or 'comment'
+            post_id       INTEGER,                    -- the commented post (comments only)
+            first_content TEXT    NOT NULL,           -- the text that triggered the reminder
+            first_score   REAL    NOT NULL,           -- its Content Score
+            final_score   REAL,                       -- Content Score of what was finally posted
+            outcome       TEXT    NOT NULL DEFAULT 'pending',
+            created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            resolved_at   TIMESTAMP
+        )
+    ''')
+    db.commit()
+    db.close()
+
+
+# Create the table when the app starts
+init_moderation_prompts_table()
+
+
+def get_pending_prompt(user_id):
+    """
+    Returns the reminder row this form submission belongs to (the hidden prompt_id
+    field on the reminder page), or None. Only the user's own, still pending
+    reminders are accepted, so a user cannot change someone else's statistics.
+    """
+    prompt_id = request.form.get('prompt_id', type=int)
+    if not prompt_id:
+        return None
+    return query_db('SELECT * FROM moderation_prompts WHERE id = ? AND user_id = ? AND outcome = ?',
+                    (prompt_id, user_id, REMINDER_PENDING), one=True)
+
+
+def check_before_publishing(content_type, content, post_id=None):
+    """
+    Checks the content before publishing and shows a reminder if necessary.
+
+    Called by add_post() and add_comment() before anything is saved.
+    Returns None if the content can be published, or a rendered reminder page if the
+    user should first see the reminder.
+
+    Content can be published when:
+      - it breaks no rules, or
+      - the user has already seen the reminder and pressed "Post anyway"
+        (only allowed when the content would not be removed completely).
+    """
+    user_id = session.get('user_id')
+    analysis = analyze_content(content)
+    confirmed = request.form.get('confirmed') == '1'
+    prompt = get_pending_prompt(user_id)
+
+    if not analysis['violations']:
+        return None
+
+    reviewed = (request.form.get('reviewed_content') or '').replace('\r\n', '\n')
+    same_text = reviewed == content.replace('\r\n', '\n')
+    if confirmed and prompt and same_text and not analysis['removed']:
+        return None
+
+    # The reminder is needed. Create a log row the first time it is shown for this
+    # draft; if the user edits and the text still breaks a rule, the same row is reused.
+    if not prompt:
+        cur = query_db('''INSERT INTO moderation_prompts
+                            (user_id, content_type, post_id, first_content, first_score)
+                          VALUES (?, ?, ?, ?, ?)''',
+                       (user_id, content_type, post_id, content, analysis['score']), commit=True)
+        prompt_id = cur.lastrowid
+    else:
+        prompt_id = prompt['id']
+
+    # Show the same risk score the admin would see: new accounts (< 7 days) get x1.5 (Rule 2.1)
+    author = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)
+    age = account_age_days(author['created_at']) if author else None
+    is_new_account = age is not None and age < 7
+    risk_score = analysis['score'] * (1.5 if is_new_account else 1.0)
+
+    return render_template('moderation_reminder.html.j2',
+                           content_type=content_type,
+                           content=content,
+                           post_id=post_id,
+                           prompt_id=prompt_id,
+                           analysis=analysis,
+                           risk_score=round(risk_score, 2),
+                           risk_label=get_risk_label(risk_score),
+                           is_new_account=is_new_account)
+
+
+def resolve_reminder(content):
+    """
+    Called right after a post/comment has been saved. If the user came through the
+    reminder page, store what they finally did: lowered the score by editing
+    (revised) or posted without lowering it (posted anyway).
+    """
+    prompt = get_pending_prompt(session.get('user_id'))
+    if not prompt:
+        return
+    _, final_score = moderate_content(content)
+    outcome = REMINDER_REVISED if final_score < prompt['first_score'] else REMINDER_POSTED_ANYWAY
+    query_db('''UPDATE moderation_prompts
+                SET final_score = ?, outcome = ?, resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ?''', (final_score, outcome, prompt['id']), commit=True)
+
+
+@app.route('/reminders/<int:prompt_id>/cancel', methods=['POST'])
+def cancel_reminder(prompt_id):
+    """The user decided not to post after seeing the reminder."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+
+    prompt = query_db('SELECT * FROM moderation_prompts WHERE id = ? AND user_id = ? AND outcome = ?',
+                      (prompt_id, user_id, REMINDER_PENDING), one=True)
+    if prompt:
+        query_db('''UPDATE moderation_prompts
+                    SET outcome = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?''',
+                 (REMINDER_CANCELLED, prompt_id), commit=True)
+        flash('Your text was not posted. Thanks for keeping MiniSocial friendly!', 'info')
+
+    # Send the user back to where they were writing
+    if prompt and prompt['content_type'] == 'comment' and prompt['post_id']:
+        return redirect(url_for('post_detail', post_id=prompt['post_id']))
+    return redirect(url_for('feed'))
+
+
+@app.route('/moderation/check', methods=['POST'])
+def moderation_check():
+    """
+    JSON endpoint for the live hint shown while typing (static/moderation_reminder.js).
+    Returns the rule check result for the given text. Nothing is saved.
+    """
+    if not session.get('user_id'):
+        return {'error': 'login required'}, 401
+    data = request.get_json(silent=True) or {}
+    analysis = analyze_content(str(data.get('content', ''))[:5000])  # limit size of the check
+    return {
+        'score': analysis['score'],
+        'removed': analysis['removed'],
+        'preview': analysis['moderated'],
+        'violations': [{'rule': v['rule'], 'title': v['title']} for v in analysis['violations']],
+    }
+
+
+def get_reminder_stats():
+    """
+    Statistics for the admin dashboard: how did users react to the reminders?
+    'Offenses avoided' = reminders after which the user either edited the text to a
+    lower score or did not post at all.
+    """
+    rows = query_db('SELECT outcome, COUNT(*) AS cnt FROM moderation_prompts GROUP BY outcome')
+    counts = {REMINDER_PENDING: 0, REMINDER_REVISED: 0, REMINDER_POSTED_ANYWAY: 0, REMINDER_CANCELLED: 0}
+    for row in rows or []:
+        counts[row['outcome']] = row['cnt']
+
+    resolved = counts[REMINDER_REVISED] + counts[REMINDER_POSTED_ANYWAY] + counts[REMINDER_CANCELLED]
+    avoided = counts[REMINDER_REVISED] + counts[REMINDER_CANCELLED]
+
+    scores = query_db('''SELECT AVG(first_score) AS first_avg, AVG(final_score) AS final_avg
+                         FROM moderation_prompts WHERE outcome IN (?, ?)''',
+                      (REMINDER_REVISED, REMINDER_POSTED_ANYWAY), one=True)
+    return {
+        'total': sum(counts.values()),
+        'counts': counts,
+        'resolved': resolved,
+        'avoided': avoided,
+        'avoided_percent': round(avoided / resolved * 100) if resolved else None,
+        'first_avg': round(scores['first_avg'], 2) if scores and scores['first_avg'] is not None else None,
+        'final_avg': round(scores['final_avg'], 2) if scores and scores['final_avg'] is not None else None,
+    }
+
+
+@app.route('/admin/delete/reminder/<int:prompt_id>', methods=['POST'])
+def admin_delete_reminder(prompt_id):
+    """Admin: delete one row from the reminder log (e.g. test data)."""
+    if session.get('username') != 'admin':
+        flash("You do not have permission to perform this action.", "danger")
+        return redirect(url_for('feed'))
+    query_db('DELETE FROM moderation_prompts WHERE id = ?', (prompt_id,), commit=True)
+    flash(f'Reminder {prompt_id} has been deleted.', 'success')
+    return redirect(url_for('admin_dashboard', tab='reminders'))
+
+
+@app.route('/admin/reminders/clear', methods=['POST'])
+def admin_clear_reminders():
+    """Admin: empty the whole reminder log, so the statistics start from zero."""
+    if session.get('username') != 'admin':
+        flash("You do not have permission to perform this action.", "danger")
+        return redirect(url_for('feed'))
+    query_db('DELETE FROM moderation_prompts', commit=True)
+    flash('All reminders have been deleted.', 'success')
+    return redirect(url_for('admin_dashboard', tab='reminders'))
+
+
+def get_recent_reminders(limit=25):
+    """Latest reminders for the admin dashboard. The ORIGINAL (unfiltered) text is
+    shown, like on the Posts and Comments tabs, so the moderator can see exactly
+    what triggered the reminder."""
+    rows = query_db('''SELECT m.*, u.username FROM moderation_prompts m
+                       JOIN users u ON m.user_id = u.id
+                       ORDER BY m.id DESC LIMIT ?''', (limit,))
+    return [dict(row) for row in rows or []]
+
 
 # Coding Assignment #3
 # Assignment 3.1
@@ -932,11 +1702,446 @@ def recommend(user_id, filter_following):
     - https://www.nvidia.com/en-us/glossary/recommendation-system/
     - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
+
+    Implementation: content-based filtering with a bonus for followed users.
+    See the helper functions and constants right below this function.
     """
+    if not user_id:
+        # Not logged in: we know nothing about the visitor, show popular posts
+        return popular_fallback(None, filter_following=False)
 
-    recommended_posts = {} 
+    all_posts = query_db('''SELECT p.id, p.content, p.created_at, p.user_id, u.username
+                          FROM posts p JOIN users u ON p.user_id = u.id''')
+    followed_ids = {row['followed_id'] for row in
+                    query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))}
+    reacted_rows = query_db('SELECT post_id, reaction_type FROM reactions WHERE user_id = ?', (user_id,))
+    reacted_ids = {row['post_id'] for row in reacted_rows}
+    liked_ids = {row['post_id'] for row in reacted_rows if row['reaction_type'] in POSITIVE_REACTIONS}
 
-    return recommended_posts;
+    # Step 1: turn every post into a set of words and compute how rare each word is (IDF)
+    tokens = {post['id']: tokenize(post['content']) for post in all_posts}
+    idf = compute_idf(tokens.values())
+
+    # Step 2: build the user's interest profile (word -> weight)
+    interest = collections.Counter()
+    for post_id in liked_ids:                       # posts the user reacted to positively
+        for word in tokens.get(post_id, ()):
+            interest[word] += LIKED_POST_WEIGHT * idf[word]
+
+    posts_by_author = collections.defaultdict(list)
+    for post in all_posts:
+        posts_by_author[post['user_id']].append(post['id'])
+    for author_id in followed_ids:                  # posts of the users the user follows
+        author_posts = posts_by_author.get(author_id, [])
+        for post_id in author_posts:
+            # Each followed user adds FOLLOWED_USER_WEIGHT in total, spread over their posts,
+            # so a followed user who posts a lot does not take over the whole profile.
+            for word in tokens[post_id]:
+                interest[word] += FOLLOWED_USER_WEIGHT * idf[word] / len(author_posts)
+
+    # Cold start: a brand-new user has not reacted to or followed anything yet
+    if not interest:
+        return popular_fallback(user_id, filter_following)
+
+    # Step 3: score candidate posts by cosine similarity to the interest profile
+    profile_norm = math.sqrt(sum(w * w for w in interest.values()))
+    scored = []
+    for post in all_posts:
+        if post['user_id'] == user_id or post['id'] in reacted_ids:
+            continue                                # skip own posts and already seen/reacted ones
+        if filter_following and post['user_id'] not in followed_ids:
+            continue                                # "Following" filter
+        words = tokens[post['id']]
+        if not words:
+            continue
+        overlap = [w for w in words if w in interest]
+        if not overlap and post['user_id'] not in followed_ids:
+            continue
+        dot = sum(interest[w] * idf[w] for w in overlap)
+        post_norm = math.sqrt(sum(idf[w] ** 2 for w in words))
+        similarity = dot / (profile_norm * post_norm) if post_norm else 0.0
+        is_followed = post['user_id'] in followed_ids
+        score = similarity + (FOLLOW_BONUS if is_followed else 0.0)
+        scored.append((score, post, overlap, is_followed))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    # Step 4: take the best posts, but skip content the moderation system would remove
+    # (Coding Assignment 2) so spam and severe violations are never recommended.
+    recommended_posts = []
+    for score, post, overlap, is_followed in scored:
+        if moderate_content(post['content'])[1] >= SEVERE_VIOLATION_SCORE:
+            continue
+        item = dict(post)
+        item['reason'] = recommendation_reason(overlap, interest, is_followed)
+        recommended_posts.append(item)
+        if len(recommended_posts) == RECOMMENDATION_COUNT:
+            break
+
+    # The docstring asks for reverse-chronological order
+    recommended_posts.sort(key=lambda p: str(p['created_at']), reverse=True)
+    return recommended_posts
+
+
+
+# Helpers for recommend()
+# Algorithm: content-based filtering (TF-IDF + cosine similarity).
+#   - Every post is represented by its words and hashtags.
+#   - Words that appear in many posts ("today", "really") say little about a topic,
+#     so each word is weighted by its inverse document frequency (IDF).
+#   - The user's interest profile is the weighted sum of the words in the posts they
+#     reacted to positively, plus (with a smaller weight) the posts of the users they follow.
+#   - Each unseen post gets a score = cosine similarity to the profile, plus a small
+#     bonus if its author is followed. The 5 best posts are recommended.
+RECOMMENDATION_COUNT = 5
+POSITIVE_REACTIONS = {'like', 'love', 'laugh', 'haha', 'wow'}  # 'sad' and 'angry' are not "liking"
+LIKED_POST_WEIGHT = 1.0
+FOLLOWED_USER_WEIGHT = 0.5
+FOLLOW_BONUS = 0.05
+
+# Very common English words that do not tell anything about the topic of a post
+STOPWORDS = set('''
+a about after again all also am an and any are as at be because been before being but by can
+could did do does doing don done down even ever every feel for from get gets getting go going
+got had has have having he her here him his how i if im in into is it its ive just know last
+like lot made make me more most much my need new no not now of off on one only or other our out
+over really right see she should so some still such than that thats the their them then there
+these they thing things think this those through time to today too up us very was way we well
+were what when where which while who why will with would yes yet you your youre
+finally finished amazing great love day days weekend night better best expected tried try
+'''.split())
+
+WORD_PATTERN = re.compile(r"#?[a-z][a-z0-9']{2,}")
+
+
+def tokenize(text):
+    """Lower-cases the text and returns the set of meaningful words.
+    Hashtags are treated as normal words ("#DIY" -> "diy") so they match the text too."""
+    words = set()
+    for raw in WORD_PATTERN.findall((text or '').lower()):
+        word = raw.lstrip('#').replace("'", '')
+        if word not in STOPWORDS and len(word) > 2:
+            words.add(word)
+    return words
+
+
+def compute_idf(token_sets):
+    """Inverse document frequency: rare words get a high weight, common words a low one."""
+    token_sets = list(token_sets)
+    doc_count = collections.Counter(word for words in token_sets for word in words)
+    total = len(token_sets)
+    return collections.defaultdict(
+        lambda: math.log(total + 1),
+        {word: math.log((total + 1) / (count + 1)) + 1 for word, count in doc_count.items()})
+
+
+def recommendation_reason(overlap, interest, is_followed):
+    """A short explanation shown under a recommended post in the feed."""
+    top_words = sorted(overlap, key=lambda w: interest[w], reverse=True)[:3]
+    parts = []
+    if top_words:
+        parts.append('you liked posts about ' + ', '.join(top_words))
+    if is_followed:
+        parts.append('you follow this user')
+    return 'Recommended because ' + ' and '.join(parts) if parts else None
+
+
+def popular_fallback(user_id, filter_following):
+    """
+    Cold start: when we know nothing about the user yet (a newcomer who has not
+    reacted to or followed anything), recommend the most-reacted posts instead of
+    showing an empty page.
+    """
+    params = []
+    conditions = []
+    if user_id:
+        conditions.append('p.user_id != ?')
+        params.append(user_id)
+        if filter_following:
+            conditions.append('p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)')
+            params.append(user_id)
+    where = ('WHERE ' + ' AND '.join(conditions)) if conditions else ''
+
+    rows = query_db(f'''
+        SELECT p.id, p.content, p.created_at, p.user_id, u.username,
+               COUNT(r.id) AS reaction_count
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN reactions r ON r.post_id = p.id
+        {where}
+        GROUP BY p.id
+        ORDER BY reaction_count DESC, p.created_at DESC
+        LIMIT 50''', params)
+
+    posts = []
+    for row in rows:
+        if moderate_content(row['content'])[1] > 0:
+            continue                                # show newcomers only content that follows the rules
+        item = dict(row)
+        item['reason'] = 'Popular in the community - react to posts you like to get personal recommendations'
+        posts.append(item)
+        if len(posts) == RECOMMENDATION_COUNT:
+            break
+    posts.sort(key=lambda p: str(p['created_at']), reverse=True)
+    return posts
+
+
+# Coding Assignment #3: two Design Claims from chapter 5
+
+NEWCOMER_PERIOD_DAYS = 7        # after this the account is a full member anyway
+NEWCOMER_DAILY_POST_LIMIT = 3   # posts per 24 hours while still a newcomer
+PROFILE_MIN_LENGTH = 20         # characters needed for the "tell us about yourself" step
+FOLLOW_GOAL = 3
+REACTION_GOAL = 3
+
+
+def init_onboarding_table():
+    """Stores the parts of the Newcomer Path that cannot be read from other tables."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS onboarding (
+            user_id       INTEGER PRIMARY KEY,
+            rules_read_at TIMESTAMP,   -- when the user confirmed reading the rules (step 1)
+            completed_at  TIMESTAMP    -- when the user finished the whole path ("graduated")
+        )
+    ''')
+    db.commit()
+    db.close()
+
+
+init_onboarding_table()
+
+
+def get_onboarding_status(user_id):
+    """
+    Returns everything about the user's place on the Newcomer Path:
+    the six steps (in order), which step is next, whether the user is still a
+    newcomer, how many days of the newcomer period are left and which privileges
+    are unlocked. Progress is read from the real data (follows, reactions, ...),
+    so the user learns the platform by actually using it.
+    """
+    user = query_db('SELECT id, username, profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return None
+    row = query_db('SELECT rules_read_at, completed_at FROM onboarding WHERE user_id = ?', (user_id,), one=True)
+
+    def count(sql):
+        return query_db(sql, (user_id,), one=True)['cnt']
+
+    follows = count('SELECT COUNT(*) AS cnt FROM follows WHERE follower_id = ?')
+    reactions = count('SELECT COUNT(*) AS cnt FROM reactions WHERE user_id = ?')
+    comments = count('SELECT COUNT(*) AS cnt FROM comments WHERE user_id = ?')
+    posts = count('SELECT COUNT(*) AS cnt FROM posts WHERE user_id = ?')
+    profile_length = len((user['profile'] or '').strip())
+
+    # The six steps, always in this order 
+    # progress is shown to the user
+    steps = [
+        {'key': 'rules', 'title': 'Read the community rules',
+         'text': 'Learn what is OK on MiniSocial before you post. This unlocks posting.',
+         'done': bool(row and row['rules_read_at']), 'progress': None,
+         'link': url_for('rules') + '#newcomer-confirm', 'link_label': 'Read the rules'},
+        {'key': 'profile', 'title': 'Tell others about yourself',
+         'text': f'Write a short profile (at least {PROFILE_MIN_LENGTH} characters) so others know who you are.',
+         'done': profile_length >= PROFILE_MIN_LENGTH,
+         'progress': f'{min(profile_length, PROFILE_MIN_LENGTH)} / {PROFILE_MIN_LENGTH} characters',
+         'link': url_for('newcomer_path') + '#profile-form', 'link_label': 'Write your profile'},
+        {'key': 'follow', 'title': f'Follow {FOLLOW_GOAL} members',
+         'text': 'Find people you find interesting. Their posts will appear in your Following feed.',
+         'done': follows >= FOLLOW_GOAL, 'progress': f'{min(follows, FOLLOW_GOAL)} / {FOLLOW_GOAL} followed',
+         'link': url_for('newcomer_path') + '#suggested-members', 'link_label': 'See suggested members'},
+        {'key': 'react', 'title': f'React to {REACTION_GOAL} posts',
+         'text': 'Reactions are the easiest way to take part. They also teach the Recommended tab what you like.',
+         'done': reactions >= REACTION_GOAL, 'progress': f'{min(reactions, REACTION_GOAL)} / {REACTION_GOAL} reactions',
+         'link': url_for('feed', sort='popular'), 'link_label': 'Browse popular posts'},
+        {'key': 'comment', 'title': 'Write your first comment',
+         'text': 'Join a conversation by commenting on a post you like.',
+         'done': comments >= 1, 'progress': None,
+         'link': url_for('feed', sort='popular'), 'link_label': 'Find a post to comment on'},
+        {'key': 'post', 'title': 'Write your first post',
+         'text': 'Introduce yourself or share something you care about.',
+         'done': posts >= 1, 'progress': None,
+         'link': url_for('feed'), 'link_label': 'Write a post'},
+    ]
+
+    # a step only counts as completed if all earlier steps are completed,
+    # only the first unfinished step is "current" rest are shown as locked.
+    current_index = None
+    for i, step in enumerate(steps):
+        if current_index is not None:
+            step['state'] = 'locked'
+        elif step['done']:
+            step['state'] = 'done'
+        else:
+            step['state'] = 'current'
+            current_index = i
+    completed_steps = current_index if current_index is not None else len(steps)
+    path_finished = current_index is None
+
+    # Mark the moment of "graduation" once, so it can be shown and is not lost
+    # if the user later e.g. unfollows someone.
+    completed_at = row['completed_at'] if row else None
+    if path_finished and not completed_at:
+        query_db('''INSERT INTO onboarding (user_id, completed_at) VALUES (?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(user_id) DO UPDATE SET completed_at = CURRENT_TIMESTAMP''',
+                 (user_id,), commit=True)
+        completed_at = datetime.utcnow()
+
+    # Fixed timetable (DC 22) and progressive access (DC 25)
+    age = account_age_days(user['created_at'])
+    age = age if age is not None else NEWCOMER_PERIOD_DAYS
+    is_newcomer = not completed_at and age < NEWCOMER_PERIOD_DAYS
+    days_left = max(0, NEWCOMER_PERIOD_DAYS - age)
+
+    rules_read = steps[0]['done']
+    privileges = [
+        {'name': 'React to posts', 'unlocked': True, 'how': 'Always allowed'},
+        {'name': 'Comment on posts', 'unlocked': True, 'how': 'Always allowed'},
+        {'name': 'Create posts', 'unlocked': rules_read or not is_newcomer,
+         'how': 'Unlocks after step 1: reading the rules'},
+        {'name': 'Unlimited posting', 'unlocked': not is_newcomer,
+         'how': f'Newcomers can post {NEWCOMER_DAILY_POST_LIMIT} posts per day. Unlocks when you finish the path'},
+    ]
+
+    return {
+        'steps': steps,
+        'completed_steps': completed_steps,
+        'total_steps': len(steps),
+        'percent': round(completed_steps / len(steps) * 100),
+        'current_step': steps[current_index] if current_index is not None else None,
+        'path_finished': path_finished,
+        'completed_at': completed_at,
+        'is_newcomer': is_newcomer,
+        'account_age_days': age,
+        'days_left': days_left,
+        'can_post': rules_read or not is_newcomer,
+        'privileges': privileges,
+    }
+
+
+@app.template_global()
+def newcomer_status():
+    """Template helper: the logged-in user's onboarding status, or None.
+    Used by the feed banner and the navigation menu."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return None
+    # Cache for the duration of one request (the menu and the feed both use it)
+    if 'newcomer_status' not in g:
+        g.newcomer_status = get_onboarding_status(user_id)
+    return g.newcomer_status
+
+
+def check_newcomer_access(content_type):
+    """
+    Design Claim 25: progressive access control. Called by add_post()
+    BEFORE anything is saved. Reacting and commenting are always allowed, so only
+    creating posts is checked. Returns an explanation (string) if the action is not yet
+    allowed for this newcomer, or None if it is allowed.
+    The message always says what unlocks the privilege, so the limit feels like a
+    step on the path, not a punishment.
+    """
+    status = get_onboarding_status(session.get('user_id'))
+    if not status or not status['is_newcomer']:
+        return None                                   # full members have no limits
+
+    if content_type == 'post':
+        if not status['can_post']:
+            return 'New members can create posts after reading the community rules (step 1 of your Newcomer Path).'
+        posts_today = query_db('''SELECT COUNT(*) AS cnt FROM posts
+                                 WHERE user_id = ? AND created_at >= datetime('now', '-1 day')''',
+                              (session.get('user_id'),), one=True)['cnt']
+        if posts_today >= NEWCOMER_DAILY_POST_LIMIT:
+            return (f'New members can write {NEWCOMER_DAILY_POST_LIMIT} posts per day. '
+                    'Finish your Newcomer Path to remove the limit.')
+    return None
+
+
+@app.route('/welcome', methods=['GET'])
+def newcomer_path():
+    """The Newcomer Path page (Design Claims 22 and 25)."""
+    user_id = session.get('user_id')
+    if not user_id:
+        flash('You must be logged in to see your Newcomer Path.', 'danger')
+        return redirect(url_for('login'))
+
+    status = get_onboarding_status(user_id)
+    me = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+
+    # Suggested members to follow (step 3): active members with the most followers
+    # that the user does not follow yet. Their latest post is shown as a preview.
+    suggested_raw = query_db('''
+        SELECT u.id, u.username, COUNT(f.follower_id) AS followers
+        FROM users u
+        JOIN follows f ON f.followed_id = u.id
+        WHERE u.id != ? AND u.username != 'admin'
+          AND u.id NOT IN (SELECT followed_id FROM follows WHERE follower_id = ?)
+          AND EXISTS (SELECT 1 FROM posts p WHERE p.user_id = u.id)
+        GROUP BY u.id
+        ORDER BY followers DESC
+        LIMIT 5''', (user_id, user_id))
+    suggested = []
+    for member in suggested_raw:
+        item = dict(member)
+        latest = query_db('SELECT content FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
+                          (item['id'],), one=True)
+        item['latest_post'] = moderate_content(latest['content'])[0] if latest else ''
+        suggested.append(item)
+
+    # Collective socialization (DC 22): the user's cohort = other members who joined
+    # within NEWCOMER_PERIOD_DAYS of this user. Showing their progress makes the
+    # newcomers a group that goes through the same steps together.
+    cohort_raw = query_db('''
+        SELECT id, username, created_at FROM users
+        WHERE id != ? AND username != 'admin'
+          AND ABS(julianday(created_at) - julianday(?)) <= ?
+        ORDER BY created_at DESC LIMIT 20''',
+        (user_id, str(me['created_at']), NEWCOMER_PERIOD_DAYS))
+    cohort = []
+    for member in cohort_raw:
+        member_status = get_onboarding_status(member['id'])
+        cohort.append({'id': member['id'], 'username': member['username'],
+                       'completed_steps': member_status['completed_steps'],
+                       'path_finished': member_status['path_finished']})
+
+    return render_template('newcomer_path.html.j2',
+                           status=status,
+                           profile=me['profile'] or '',
+                           suggested=suggested,
+                           cohort=cohort,
+                           profile_min_length=PROFILE_MIN_LENGTH)
+
+
+@app.route('/welcome/rules-read', methods=['POST'])
+def confirm_rules_read():
+    """Step 1: the user confirms they have read the rules (button on the /rules page)."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    query_db('''INSERT INTO onboarding (user_id, rules_read_at) VALUES (?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET rules_read_at = COALESCE(rules_read_at, CURRENT_TIMESTAMP)''',
+             (user_id,), commit=True)
+    flash('Thanks for reading the rules! Posting is now unlocked.', 'success')
+    return redirect(url_for('newcomer_path'))
+
+
+@app.route('/welcome/profile', methods=['POST'])
+def update_profile():
+    """Step 2: write or update the profile text. The text goes through the same
+    moderation as everything else (Coding Assignment 2)."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    profile = (request.form.get('profile') or '').strip()
+
+    analysis = analyze_content(profile)
+    if analysis['removed']:
+        flash('Your profile contains something our rules do not allow. Please edit it.', 'warning')
+        return redirect(url_for('newcomer_path') + '#profile-form')
+    query_db('UPDATE users SET profile = ? WHERE id = ?', (profile, user_id), commit=True)
+    flash('Your profile was saved.', 'success')
+    return redirect(url_for('newcomer_path'))
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

@@ -1,0 +1,141 @@
+{% extends "base.html.j2" %}
+{#
+  Coding Assignment 3 - Chapter 5 (Kraut et al. 2011)
+
+  Design Claim 22: formal, sequential and collective socialization.
+    - formal:     every newcomer gets the same, structured path made for newcomers
+    - sequential: six steps in a fixed order, later steps are locked until earlier ones are done
+    - fixed:      a clear timetable (7 days as a newcomer)
+    - collective: "Your newcomer group" shows the others who joined at the same time
+
+  Design Claim 25: progressive access controls.
+    - "Your privileges" lists what is unlocked and what unlocks the rest.
+#}
+{% block content %}
+<div class="col-md-8 mx-auto pt-4">
+
+  <!-- Header: status and timetable -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h2 class="card-title">Your Newcomer Path</h2>
+      {% if status.path_finished %}
+        <p class="text-success mb-2"><strong>&#127891; You have finished the Newcomer Path and are now a full member!</strong>
+          All privileges are unlocked. Thanks for learning the ropes.</p>
+      {% elif not status.is_newcomer %}
+        <p class="mb-2">Your account is older than 7 days, so you are already a full member
+          and have all privileges. You can still use the path as a checklist.</p>
+      {% else %}
+        <p class="mb-2">Welcome to MiniSocial! Every new member goes through the same six steps. They teach you how
+          the community works, and each step unlocks more of the site.</p>
+        <p class="text-muted small mb-2">
+          Timetable: you are a <strong>newcomer</strong> for 7 days (day {{ status.account_age_days + 1 }} of 7,
+          {{ status.days_left }} day{{ 's' if status.days_left != 1 }} left).
+          Finish all steps to become a <strong>full member</strong> right away.
+        </p>
+      {% endif %}
+      <div class="progress mb-1" style="height: 14px;">
+        <div class="progress-bar {{ 'bg-success' if status.path_finished }}" style="width: {{ status.percent }}%;">
+          {{ status.completed_steps }} / {{ status.total_steps }}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- The six steps, in order (sequential socialization) -->
+  <h4 class="mb-3">Steps</h4>
+  <ol class="list-group list-group-numbered mb-4">
+    {% for step in status.steps %}
+    <li class="list-group-item d-flex justify-content-between align-items-start
+               {% if step.state == 'current' %}border-primary{% elif step.state == 'locked' %}text-muted{% endif %}">
+      <div class="ms-2 me-auto">
+        <div class="fw-bold">
+          {{ step.title }}
+          {% if step.state == 'done' %}<span class="badge bg-success ms-1">&#10003; done</span>
+          {% elif step.state == 'current' %}<span class="badge bg-primary ms-1">next</span>
+          {% else %}<span class="badge bg-secondary ms-1">&#128274; finish the previous step first</span>{% endif %}
+        </div>
+        <small>{{ step.text }}</small>
+        {% if step.progress and step.state != 'done' %}<div class="small text-muted">{{ step.progress }}</div>{% endif %}
+      </div>
+      {% if step.state == 'current' %}
+        <a href="{{ step.link }}" class="btn btn-primary btn-sm">{{ step.link_label }}</a>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+
+  <!-- Step 2: profile form -->
+  <div class="card shadow-sm mb-4" id="profile-form">
+    <div class="card-body">
+      <h5 class="card-title">About you (step 2)</h5>
+      <form action="{{ url_for('update_profile') }}" method="POST">
+        <textarea class="form-control mb-2" name="profile" rows="3" data-moderation-hint
+                  placeholder="Who are you, what do you like, what brings you to MiniSocial?">{{ profile }}</textarea>
+        <small class="text-muted d-block mb-2">At least {{ profile_min_length }} characters. Other members see this on your profile.</small>
+        <button type="submit" class="btn btn-primary btn-sm">Save profile</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Step 3: suggested members -->
+  <div class="card shadow-sm mb-4" id="suggested-members">
+    <div class="card-body">
+      <h5 class="card-title">Members you could follow (step 3)</h5>
+      {% for member in suggested %}
+      <div class="d-flex justify-content-between align-items-start border-bottom py-2">
+        <div class="me-3">
+          <a href="{{ url_for('user_profile', username=member.username) }}"><strong>@{{ member.username }}</strong></a>
+          <small class="text-muted">&middot; {{ member.followers }} followers</small>
+          {% if member.latest_post %}<div class="small text-muted">"{{ member.latest_post|truncate(110) }}"</div>{% endif %}
+        </div>
+        <form action="{{ url_for('follow_user', user_id=member.id) }}" method="POST">
+          <button type="submit" class="btn btn-sm btn-primary">Follow</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">No suggestions right now.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Design Claim 25: what is unlocked and how to unlock the rest -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">Your privileges</h5>
+      <p class="small text-muted">New accounts start with a few limits. This protects the community from spam
+        while you learn how things work here. The limits disappear step by step.</p>
+      <table class="table table-sm mb-0">
+        <tbody>
+          {% for p in status.privileges %}
+          <tr>
+            <td>{% if p.unlocked %}&#9989;{% else %}&#128274;{% endif %} {{ p.name }}</td>
+            <td class="small text-muted">{{ 'Unlocked' if p.unlocked else p.how }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Design Claim 22, collective socialization: the newcomer cohort -->
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">Your newcomer group</h5>
+      <p class="small text-muted">Members who joined MiniSocial around the same time as you. You are going through
+        the same steps &ndash; say hi, follow each other and help each other out!</p>
+      {% for member in cohort %}
+      <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+        <a href="{{ url_for('user_profile', username=member.username) }}">@{{ member.username }}</a>
+        {% if member.path_finished %}
+          <span class="badge bg-success">&#127891; finished the path</span>
+        {% else %}
+          <span class="small text-muted">step {{ member.completed_steps }} / 6 done</span>
+        {% endif %}
+      </div>
+      {% else %}
+      <p class="text-muted mb-0">Nobody else has joined in the last few days. You are the first of your group!</p>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

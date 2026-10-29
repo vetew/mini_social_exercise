@@ -7,21 +7,38 @@
 </div>
 
 {% if session.get('user_id') %}
+{# Coding Assignment 3 (Ch. 5, DC 22 + DC 25): newcomer banner with the next step of the path #}
+{% include "newcomer_banner.html.j2" %}
+{% set ns_feed = newcomer_status() %}
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
       <h5 class="card-title">Create a new post</h5>
+      {% if ns_feed and not ns_feed.can_post %}
+      <!-- DC 25 progressive access: posting is locked until the newcomer has read the rules -->
+      <p class="text-muted mb-2">&#128274; Posting unlocks after step 1 of your Newcomer Path: reading the community rules.
+        Meanwhile you can already react to and comment on posts.</p>
+      <a href="{{ url_for('rules') }}#newcomer-confirm" class="btn btn-primary btn-sm">Read the rules</a>
+      {% else %}
       <form action="{{ url_for('add_post') }}" method="POST">
         <div class="mb-3">
-          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+          <!-- data-moderation-hint: live rule reminder while typing (Coding Assignment 2, DC 20) -->
+          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" data-moderation-hint required></textarea>
         </div>
         <button type="submit" class="btn btn-primary float-end">Post</button>
       </form>
+      {% if ns_feed and ns_feed.is_newcomer %}
+      <small class="text-muted">As a new member you can write 3 posts per day.
+        <a href="{{ url_for('newcomer_path') }}">Why?</a></small>
+      {% endif %}
+      {% endif %}
     </div>
   </div>
 </div>
 {% endif %}
 
+<!-- Coding Assignment 1: weekly goal progress (Ch. 2, DC 13) -->
+{% include "goal_widget.html.j2" %}
 <h2 class="text-center border-bottom pb-2 mb-4"><span>Posts</span></h2>
 
 <div class="mb-4 text-center">
@@ -77,6 +94,10 @@
       </div>
       
       <p class="mt-2">{{ entry.post.content }}</p>
+      {% if entry.post.reason %}
+      <!-- Coding Assignment 3: explanation of why recommend() picked this post -->
+      <p class="small text-muted mb-1">&#10024; {{ entry.post.reason }}</p>
+      {% endif %}
 
       <!-- Reactions Display and Add Reaction Button -->
       <div class="d-flex align-items-center mt-2 mb-2">
@@ -175,7 +196,7 @@
           <form action="/posts/{{ entry.post.id }}/comment" method="POST">
             <div class="mb-3">
               <label for="comment-content-{{ entry.post.id }}" class="form-label">Your Comment</label>
-              <textarea class="form-control" id="comment-content-{{ entry.post.id }}" name="content" rows="3" required></textarea>
+              <textarea class="form-control" id="comment-content-{{ entry.post.id }}" name="content" rows="3" data-moderation-hint required></textarea>
             </div>
             <button type="submit" class="btn btn-primary">Submit Comment</button>
           </form>

@@ -8,6 +8,8 @@
             <p class="lead text-muted">This document outlines the precise technical rules governing the automated systems for content moderation and risk score calculation. All user-submitted content and user accounts are evaluated according to these exact specifications.</p>
         </div>
 
+        <!-- Coding Assignment 2: each rule below has an id (e.g. #rule-1-2-1) so that the
+             Design Claim 20 reminder can link directly to the rule that was broken. -->
         <!-- Section 1: Content Moderation -->
         <div class="card shadow-sm mb-4">
             <div class="card-header bg-primary ">
@@ -19,16 +21,16 @@
                 <h5 class="mt-4">Stage 1.1: Severe Violation Checks</h5>
                 <p>Content is checked against high-priority violation tiers. A match results in immediate content removal and a maximum score.</p>
                 <ul class="list-group list-group-flush mb-3">
-                    <li class="list-group-item"><strong>Rule 1.1.1 (Tier 1 Words):</strong> A case-insensitive, whole-word search is performed against the Tier 1 Word List. If a match is found, the function immediately returns the string <code>[content removed due to severe violation]</code> and a fixed Content Score of <strong>5.0</strong>.</li>
-                    <li class="list-group-item"><strong>Rule 1.1.2 (Tier 2 Phrases):</strong> If no Tier 1 match is found, a case-insensitive, whole-phrase search is performed against the Tier 2 Phrase List. If a match is found, the function immediately returns the string <code>[content removed due to spam/scam policy]</code> and a fixed Content Score of <strong>5.0</strong>.</li>
+                    <li class="list-group-item" id="rule-1-1-1"><strong>Rule 1.1.1 (Tier 1 Words):</strong> A case-insensitive, whole-word search is performed against the Tier 1 Word List. If a match is found, the function immediately returns the string <code>[content removed due to severe violation]</code> and a fixed Content Score of <strong>5.0</strong>.</li>
+                    <li class="list-group-item" id="rule-1-1-2"><strong>Rule 1.1.2 (Tier 2 Phrases):</strong> If no Tier 1 match is found, a case-insensitive, whole-phrase search is performed against the Tier 2 Phrase List. If a match is found, the function immediately returns the string <code>[content removed due to spam/scam policy]</code> and a fixed Content Score of <strong>5.0</strong>.</li>
                 </ul>
 
                 <h5 class="mt-4">Stage 1.2: Scored Violations & Filtering</h5>
                 <p>If the content passes Stage 1.1, its Content Score starts at 0.0 and is incremented based on the following rules:</p>
                 <ul class="list-group list-group-flush">
-                    <li class="list-group-item"><strong>Rule 1.2.1 (Tier 3 Words):</strong> Each case-insensitive, whole-word match from the Tier 3 Word List is replaced with asterisks (<code>*</code>) equal to its length. The Content Score is incremented by <strong>+2.0</strong> for each match.</li>
-                    <li class="list-group-item"><strong>Rule 1.2.2 (External Links):</strong> Each detected URL is replaced with <code>[link removed]</code>. The Content Score is incremented by <strong>+2.0</strong> for each match.</li>
-                    <li class="list-group-item"><strong>Rule 1.2.3 (Excessive Capitalization):</strong> If content has >15 alphabetic characters and >70% are uppercase, the Content Score is incremented by a fixed value of <strong>+0.5</strong>. The content is not modified.</li>
+                    <li class="list-group-item" id="rule-1-2-1"><strong>Rule 1.2.1 (Tier 3 Words):</strong> Each case-insensitive, whole-word match from the Tier 3 Word List is replaced with asterisks (<code>*</code>) equal to its length. The Content Score is incremented by <strong>+2.0</strong> for each match.</li>
+                    <li class="list-group-item" id="rule-1-2-2"><strong>Rule 1.2.2 (External Links):</strong> Each detected URL is replaced with <code>[link removed]</code>. The Content Score is incremented by <strong>+2.0</strong> for each match.</li>
+                    <li class="list-group-item" id="rule-1-2-3"><strong>Rule 1.2.3 (Excessive Capitalization):</strong> If content has >15 alphabetic characters and >70% are uppercase, the Content Score is incremented by a fixed value of <strong>+0.5</strong>. The content is not modified.</li>
                 </ul>
             </div>
         </div>
@@ -85,6 +87,29 @@
                 <li><strong>NONE:</strong> Score is less than 1.0.</li>
             </ul>
         </div>
+
+        <!-- Coding Assignment 3 (Ch. 5, DC 22 + DC 25): step 1 of the Newcomer Path.
+             Newcomers confirm here that they have read the rules, which unlocks posting. -->
+        {% set ns_rules = newcomer_status() %}
+        {% if ns_rules and ns_rules.is_newcomer %}
+        <div class="card shadow-sm mb-4 border-primary" id="newcomer-confirm">
+            <div class="card-body">
+                <h4 class="card-title">New here? Welcome!</h4>
+                <p>In short: be kind, no hate speech or spam, and avoid shouting in capitals. Posts that break
+                   the rules are filtered or removed, and their authors get a higher risk score.</p>
+                <p class="mb-3">While you are a new member you can react, comment and write up to 3 posts per day.
+                   The limit disappears when you finish your Newcomer Path.</p>
+                {% if ns_rules.steps[0].done %}
+                    <span class="badge bg-success">&#10003; You have read the rules</span>
+                    <a href="{{ url_for('newcomer_path') }}" class="ms-2">Back to your Newcomer Path</a>
+                {% else %}
+                <form action="{{ url_for('confirm_rules_read') }}" method="POST">
+                    <button type="submit" class="btn btn-primary">I have read the rules &ndash; unlock posting</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}

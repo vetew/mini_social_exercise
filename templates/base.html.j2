@@ -58,6 +58,17 @@
             <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="navbarUserDropdown">
               <!-- Link to user's profile page -->
               <li><a class="dropdown-item" href="{{ url_for('user_profile', username=session.get('username')) }}">My Profile</a></li>
+              <!-- Coding Assignment 1: link to "friends of friends" suggestions (Ch. 3, DC 14) -->
+              <li><a class="dropdown-item" href="{{ url_for('people_you_may_know') }}">People you may know</a></li>
+              <!-- Coding Assignment 1: link to "Pay it back" page (Ch. 3, DC 31) -->
+              <li><a class="dropdown-item" href="{{ url_for('pay_it_back') }}">Pay it back</a></li>
+              <!-- Coding Assignment 1: link to weekly goals (Ch. 2, DC 13) -->
+              <li><a class="dropdown-item" href="{{ url_for('goals') }}">Weekly goals</a></li>
+              <!-- Coding Assignment 3: Newcomer Path (Ch. 5, DC 22 and DC 25) -->
+              {% set ns_menu = newcomer_status() %}
+              <li><a class="dropdown-item" href="{{ url_for('newcomer_path') }}">
+                Newcomer path{% if ns_menu and ns_menu.is_newcomer %} ({{ ns_menu.completed_steps }}/{{ ns_menu.total_steps }}){% endif %}
+              </a></li>
               <li><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item" href="/logout">Logout</a></li>
             </ul>
@@ -105,6 +116,11 @@
 
 <!-- Bootstrap 5 JS Bundle (includes Popper) -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+
+<!-- Coding Assignment 2, Design Claim 20: live rule hint under text boxes marked with data-moderation-hint -->
+{% if session.get('user_id') %}
+<script src="{{ url_for('static', filename='moderation_reminder.js') }}"></script>
+{% endif %}
 
 {% include "footer.html.j2" %}
 </body>

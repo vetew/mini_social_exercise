@@ -1,0 +1,35 @@
+{# Chapter 2, Design Claims 13 and 15: weekly goal progress shown on the front page.
+   Included in feed.html.j2. get_goal_progress() is defined in app.py. #}
+{% if session.get('user_id') %}
+{% set gp = get_goal_progress(session.get('user_id')) %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card shadow-sm">
+    <div class="card-body">
+      {% if gp %}
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h6 class="mb-0">Your weekly goal</h6>
+          <small class="text-muted">{{ gp.days_left }} day{{ 's' if gp.days_left != 1 }} left</small>
+        </div>
+        {% if gp.completed %}
+          <p class="text-success mb-2">Goal reached this week. Great job!</p>
+        {% endif %}
+        <small>Posts: {{ gp.posts_done }} / {{ gp.post_goal }}</small>
+        <div class="progress mb-2" style="height: 10px;">
+          <div class="progress-bar {{ 'bg-success' if gp.posts_percent == 100 }}" style="width: {{ gp.posts_percent }}%;"></div>
+        </div>
+        <small>Comments: {{ gp.comments_done }} / {{ gp.comment_goal }}</small>
+        <div class="progress mb-2" style="height: 10px;">
+          <div class="progress-bar {{ 'bg-success' if gp.comments_percent == 100 }}" style="width: {{ gp.comments_percent }}%;"></div>
+        </div>
+        <a href="{{ url_for('goals') }}" class="small">Change goal</a>
+      {% else %}
+        <!-- No goal yet: invite the user to set one -->
+        <div class="d-flex justify-content-between align-items-center">
+          <span>Challenge yourself! Set a weekly posting goal.</span>
+          <a href="{{ url_for('goals') }}" class="btn btn-primary btn-sm">Set a goal</a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}

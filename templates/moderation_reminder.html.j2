@@ -1,0 +1,115 @@
+{% extends "base.html.j2" %}
+{#
+  Coding Assignment 2 - Design Claim 20 ch. 4):
+  "Offering people reminders at the point of an action that may violate norms
+   reduces the number of offenses."
+
+  This page is shown by check_before_publishing() in app.py when a post or a
+  comment breaks a rule. Nothing has been published yet. The user can
+    1) edit the text and check it again,
+    2) post it anyway (not possible if the whole text would be removed), or
+    3) cancel.
+#}
+{% block content %}
+{% set what = 'post' if content_type == 'post' else 'comment' %}
+{% set submit_url = url_for('add_post') if content_type == 'post' else url_for('add_comment', post_id=post_id) %}
+
+<div class="col-md-8 mx-auto pt-4">
+  <div class="card shadow-sm border-warning">
+    <div class="card-body">
+      <h3 class="card-title">Before you {{ 'post' if content_type == 'post' else 'comment' }}: a quick check</h3>
+
+      {% if analysis.removed %}
+        <p class="mb-3">
+          You may not have noticed, but your {{ what }} contains something our community rules
+          do not allow at all. If it was posted, <strong>the whole {{ what }} would be removed</strong>.
+          No harm done, nothing has been published. Please edit the text below.
+        </p>
+      {% else %}
+        <p class="mb-3">
+          You may not have noticed, but your {{ what }} goes against
+          {{ 'a rule' if analysis.violations|length == 1 else 'some rules' }} of our community.
+          Nothing has been published yet, so you can still change it.
+        </p>
+      {% endif %}
+
+      <!-- Which rules would be broken, with links to the rules page -->
+      <h6>What we noticed</h6>
+      <ul class="list-group mb-3">
+        {% for v in analysis.violations %}
+        <li class="list-group-item d-flex justify-content-between align-items-start">
+          <div>
+            <strong>{{ v.title }}</strong>
+            <a href="{{ url_for('rules') }}#rule-{{ v.rule|replace('.', '-') }}" target="_blank" class="small ms-1">(Rule {{ v.rule }})</a>
+            <div class="small text-muted">{{ v.detail }}</div>
+          </div>
+          <span class="badge bg-secondary">+{{ v.points }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+
+      <!-- How other members would see the text (the moderated version) -->
+      <h6>This is how others would see it</h6>
+      <div class="card shadow-none p-2 mb-3 bg-light">
+        <p class="mb-0">{{ analysis.moderated }}</p>
+      </div>
+
+      <p class="small text-muted mb-4">
+        Risk score of this {{ what }}: <strong>{{ risk_score }} ({{ risk_label }})</strong>.
+        {% if is_new_account %}Your account is less than 7 days old, so the score is multiplied by 1.5.{% endif %}
+        Moderators use these scores to decide which content to review.
+      </p>
+
+      <!-- One form with two buttons, so both always send the text that is currently in the box:
+           - "Check again" re-runs the rules on the (edited) text
+           - "Post anyway" publishes it, but only if it is the same text this reminder was
+             shown for (reviewed_content) and it would not be removed completely.
+             The server checks both conditions in check_before_publishing(). -->
+      <form action="{{ submit_url }}" method="POST" id="reminder-form">
+        <input type="hidden" name="prompt_id" value="{{ prompt_id }}">
+        <input type="hidden" name="reviewed_content" id="reviewed-content" value="{{ content }}">
+        <label for="reminder-content" class="form-label fw-bold">Edit your {{ what }}</label>
+        <textarea class="form-control mb-2" id="reminder-content" name="content" rows="4"
+                  data-moderation-hint required autofocus>{{ content }}</textarea>
+
+        <div class="d-flex justify-content-between align-items-center">
+          <button type="submit" class="btn btn-primary">Check again and {{ 'post' if content_type == 'post' else 'comment' }}</button>
+          {% if not analysis.removed %}
+          <div class="text-end">
+            <button type="submit" name="confirmed" value="1" id="post-anyway-btn" class="btn btn-secondary">
+              Post anyway (it will be shown filtered)
+            </button>
+            <div class="small text-muted d-none" id="post-anyway-note">You changed the text. Check it again first.</div>
+          </div>
+          {% else %}
+          <span class="small text-muted">This text cannot be posted as it is.</span>
+          {% endif %}
+        </div>
+      </form>
+
+      <!-- Give up: nothing is posted -->
+      <form action="{{ url_for('cancel_reminder', prompt_id=prompt_id) }}" method="POST" class="border-top pt-3 mt-3">
+        <button type="submit" class="btn btn-light">Cancel, don't post</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+  // "Post anyway" only makes sense for the text the reminder was shown for.
+  // As soon as the user edits the text, disable the button until the text is checked again.
+  // (This is only for clarity; the server enforces the same rule.)
+  document.addEventListener('DOMContentLoaded', () => {
+    const box = document.getElementById('reminder-content');
+    const reviewed = document.getElementById('reviewed-content').value;
+    const btn = document.getElementById('post-anyway-btn');
+    const note = document.getElementById('post-anyway-note');
+    if (!btn) return;
+    box.addEventListener('input', () => {
+      const changed = box.value.replace(/\r\n/g, '\n') !== reviewed.replace(/\r\n/g, '\n');
+      btn.disabled = changed;
+      note.classList.toggle('d-none', !changed);
+    });
+  });
+</script>
+{% endblock %}

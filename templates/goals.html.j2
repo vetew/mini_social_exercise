@@ -1,0 +1,65 @@
+{% extends "base.html.j2" %}
+{% block content %}
+
+{# Chapter 2, Design Claim 13 (+ 14 and 15): weekly goals #}
+<div class="container mt-4 col-md-8 mx-auto">
+  <h2 class="border-bottom pb-2 mb-4">Weekly goals</h2>
+
+  <!-- Current progress (feedback, DC 15) and deadline (DC 14) -->
+  {% if progress %}
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <div class="d-flex justify-content-between">
+          <h5>This week's progress</h5>
+          <span class="text-muted">{{ progress.days_left }} day{{ 's' if progress.days_left != 1 }} left (resets on Monday)</span>
+        </div>
+        {% if progress.completed %}
+          <div class="alert alert-success py-2">You reached your goal this week!</div>
+        {% endif %}
+        <p class="mb-1">Posts: <strong>{{ progress.posts_done }} / {{ progress.post_goal }}</strong></p>
+        <div class="progress mb-3" style="height: 20px;">
+          <div class="progress-bar {{ 'bg-success' if progress.posts_percent == 100 }}" style="width: {{ progress.posts_percent }}%;">{{ progress.posts_percent }}%</div>
+        </div>
+        <p class="mb-1">Comments: <strong>{{ progress.comments_done }} / {{ progress.comment_goal }}</strong></p>
+        <div class="progress mb-2" style="height: 20px;">
+          <div class="progress-bar {{ 'bg-success' if progress.comments_percent == 100 }}" style="width: {{ progress.comments_percent }}%;">{{ progress.comments_percent }}%</div>
+        </div>
+
+        <!-- Comparison to other members -->
+        {% if community_avg %}
+          <p class="text-muted small mb-0 mt-3">
+            The {{ community_avg.users }} other active member{{ 's' if community_avg.users != 1 }} this week
+            made on average {{ community_avg.posts }} posts and {{ community_avg.comments }} comments.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+
+  <!-- Form for setting (or changing) the goal -->
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h5>{{ 'Change your goal' if progress else 'Set your weekly goal' }}</h5>
+      <p class="text-muted">
+        Suggested challenging goal for you:
+        <strong>{{ suggestion.posts }} posts</strong> and <strong>{{ suggestion.comments }} comments</strong> per week.
+      </p>
+      <form method="POST" class="row g-3 align-items-end">
+        <div class="col-sm-4">
+          <label class="form-label">Posts per week</label>
+          <input type="number" name="post_goal" class="form-control" min="1" max="50"
+                 value="{{ progress.post_goal if progress else suggestion.posts }}" required>
+        </div>
+        <div class="col-sm-4">
+          <label class="form-label">Comments per week</label>
+          <input type="number" name="comment_goal" class="form-control" min="1" max="100"
+                 value="{{ progress.comment_goal if progress else suggestion.comments }}" required>
+        </div>
+        <div class="col-sm-4">
+          <button type="submit" class="btn btn-primary w-100">Save goal</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

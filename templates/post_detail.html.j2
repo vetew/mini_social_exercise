@@ -112,7 +112,7 @@
         <form action="/posts/{{ post.id }}/comment" method="POST">
           <div class="mb-3">
             <label for="comment-content-{{ post.id }}" class="form-label">Your Comment</label>
-            <textarea class="form-control" id="comment-content-{{ post.id }}" name="content" rows="3" required></textarea>
+            <textarea class="form-control" id="comment-content-{{ post.id }}" name="content" rows="3" data-moderation-hint required></textarea>
           </div>
           <button type="submit" class="btn btn-primary">Submit Comment</button>
         </form>

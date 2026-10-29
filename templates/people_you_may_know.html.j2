@@ -1,0 +1,67 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+
+{# Chapter 3, Design Claim 14: "friends of friends" suggestions #}
+<div class="container mt-4 col-md-8 mx-auto">
+  <h2 class="border-bottom pb-2 mb-2">People you may know</h2>
+  <p class="text-muted mb-4">
+    These people are followed by users you already follow.
+  </p>
+
+  {% if suggestions %}
+    {% for s in suggestions %}
+      <div class="card shadow-sm mb-3">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <!-- Username links to the profile -->
+              <h5 class="mb-1">{{ user_display(s.username) }}</h5>
+
+              <!-- Explain why this user is suggested: shared connections -->
+              <small class="text-muted">
+                Followed by
+                {% for name in s.mutual_names %}
+                  <a href="{{ url_for('user_profile', username=name) }}">@{{ name }}</a>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+                {% if s.mutual_count > s.mutual_names|length %}
+                  and {{ s.mutual_count - s.mutual_names|length }} other{{ 's' if s.mutual_count - s.mutual_names|length > 1 }} you follow
+                {% endif %}
+              </small>
+            </div>
+
+            <!-- Follow button reuses the existing follow route.
+                 After following, the user is redirected back here and
+                 the person disappears from the suggestions. -->
+            <form action="{{ url_for('follow_user', user_id=s.id) }}" method="POST">
+              <button type="submit" class="btn btn-primary btn-sm">Follow</button>
+            </form>
+          </div>
+
+          {% if s.profile %}
+            <p class="mt-2 mb-2">{{ s.profile[:150] }}{% if s.profile|length > 150 %}…{% endif %}</p>
+          {% endif %}
+
+          <!-- Latest post works as a conversation starter -->
+          {% if s.latest_post %}
+            <div class="border rounded p-2 bg-light">
+              <small class="text-muted">Latest post · {{ s.latest_post.created_at | datetimeformat }}</small>
+              <p class="mb-1">{{ s.latest_post.content[:200] }}{% if s.latest_post.content|length > 200 %}…{% endif %}</p>
+              <a href="{{ url_for('post_detail', post_id=s.latest_post.id) }}" class="btn btn-secondary btn-sm">View &amp; comment</a>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
+  {% elif following_count == 0 %}
+    <div class="card shadow-sm"><div class="card-body text-center text-muted">
+      You don't follow anyone yet. Follow a few people from the <a href="/">feed</a>,
+      and we'll suggest people they follow.
+    </div></div>
+  {% else %}
+    <div class="card shadow-sm"><div class="card-body text-center text-muted">
+      No new suggestions right now. You already follow everyone your connections follow!
+    </div></div>
+  {% endif %}
+</div>
+{% endblock %}

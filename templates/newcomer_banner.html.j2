@@ -1,0 +1,29 @@
+{#
+  Coding Assignment 3 Chapter 5, Design Claims 22 and 25.
+  Shown at the top of the feed while the user is a newcomer: progress on the
+  Newcomer Path, the next step, and how many days the newcomer period has left.
+  newcomer_status() is defined in app.py.
+#}
+{% set ns = newcomer_status() %}
+{% if ns and ns.is_newcomer %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card shadow-sm border-primary">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h6 class="mb-0">Your Newcomer Path: step {{ ns.completed_steps + 1 }} of {{ ns.total_steps }}</h6>
+        <small class="text-muted">{{ ns.days_left }} day{{ 's' if ns.days_left != 1 }} left as a newcomer</small>
+      </div>
+      <div class="progress mb-2" style="height: 10px;">
+        <div class="progress-bar" style="width: {{ ns.percent }}%;"></div>
+      </div>
+      {% if ns.current_step %}
+      <p class="mb-2"><strong>Next:</strong> {{ ns.current_step.title }}
+        {% if ns.current_step.progress %}<span class="text-muted">({{ ns.current_step.progress }})</span>{% endif %}
+      </p>
+      <a href="{{ ns.current_step.link }}" class="btn btn-primary btn-sm">{{ ns.current_step.link_label }}</a>
+      <a href="{{ url_for('newcomer_path') }}" class="btn btn-light btn-sm">See the whole path</a>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
